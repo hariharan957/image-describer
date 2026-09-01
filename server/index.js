@@ -1,0 +1,72 @@
+import express from 'express';
+import cors from 'cors';
+import 'dotenv/config';
+import { describeImage, isConfigured, currentModel } from './claude.js';
+import { addItem, listItems, getItem, clearItems } from './store.js';
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+app.use(cors());
+// JSON body with a generous limit for base64-encoded images (10MB raw → ~13MB b64).
+app.use(express.json({ limit: '15mb' }));
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    configured: isConfigured(),
+    model: currentModel(),
+  });
+});
+
+app.post('/api/describe', async (req, res) => {
+  const { image, mime, style, fileName } = req.body || {};
+  if (!image || !mime) {
+    return res.status(400).json({ error: 'Missing image or mime' });
+  }
+  if (!mime.startsWith('image/')) {
+    return res.status(400).json({ error: 'mime must be an image/* type' });
+  }
+  if (!isConfigured()) {
+    return res.status(503).json({
+      error: 'Server is missing OPENROUTER_API_KEY. Add it to server/.env and restart.',
+    });
+  }
+  try {
+    const text = await describeImage({ base64: image, mime, style });
+    const summary = text.split(/[.\n]/).map((s) => s.trim()).find(Boolean) || text.slice(0, 120);
+    const stored = addItem({
+      fileName: fileName || 'image',
+      mime,
+      // Thumbnail — send full base64 back so the client can render it.
+      image,
+      style: style || 'detailed',
+      description: text,
+      summary: summary.slice(0, 160),
+    });
+    res.json({ id: stored.id, description: text, summary: stored.summary });
+  } catch (err) {
+    console.error('describe error:', err);
+    res.status(500).json({ error: err.message || 'Failed to describe image' });
+  }
+});
+
+app.get('/api/history', (req, res) => {
+  res.json({ items: listItems() });
+});
+
+app.get('/api/history/:id', (req, res) => {
+  const item = getItem(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  res.json(item);
+});
+
+app.delete('/api/history', (req, res) => {
+  clearItems();
+  res.json({ ok: true });
+});
+
+app.listen(PORT, () => {
+  console.log(`Image-describer API listening on http://localhost:${PORT}`);
+  console.log(`Anthropic key configured: ${isConfigured()}`);
+});
